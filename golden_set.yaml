@@ -1,0 +1,263 @@
+# =============================================================================
+# GOLDEN SET — eval ground truth for the 2022 WC tactical pipeline
+# =============================================================================
+# Each case tests one or more of THREE SEPARABLE graders:
+#
+#   routing      : did we resolve the right match + right concept?
+#   computation  : do the computed numbers match externally-verifiable truth?
+#   faithfulness : does the answer respect the KB guardrails / not overstate?
+#
+# CONCEPT GROUND TRUTH — three forms:
+#   concept: X          -> the top concept MUST be X. Used where a competent
+#                          analyst would give exactly one answer.
+#   concept_any: [X, Y] -> the top concept must be one of these. Used where the
+#                          question LEGITIMATELY reads as more than one concept.
+#                          Every use carries a `why` note. This is not a way to
+#                          make failures pass: if an analyst would not accept the
+#                          reading, it does not go in the list.
+#   concept: null       -> must match NOTHING (open-ended question).
+#
+# Why concept_any exists: pressing_intensity and defensive_line_height overlap by
+# nature — a deep block usually implies a low press. The first version of this
+# file demanded `pressing_intensity` for "did they sit back and absorb", which is
+# literally the definition of a deep block. The retriever was right; the ground
+# truth was wrong. False precision in an eval punishes correct behaviour.
+#
+# `expect.match_id: null` means the router SHOULD refuse (ambiguous/none) —
+# refusing correctly is a pass, guessing is a fail. These negative cases matter
+# as much as the happy path: a system that never says "I don't know" is lying.
+#
+# expect.numeric values are tolerances, not exact floats — StatsBomb event
+# counts are stable but our derived ratios shift if thresholds are re-tuned.
+# =============================================================================
+
+cases:
+
+  # ---------------------- routing: happy path ----------------------
+  # STRICT on purpose: "how aggressively did they press" has exactly one right
+  # answer. An analyst would not answer it with line height. When the embedding
+  # retriever returned defensive_line_height here, that was a REAL miss — not a
+  # ground-truth problem. Do not loosen this one.
+  - id: route_pressing_mor_esp
+    question: "How aggressively did Spain press against Morocco?"
+    expect:
+      match_id: 3869220
+      concept: pressing_intensity
+
+  - id: route_midfield_final
+    question: "Who controlled the midfield in the final?"
+    expect:
+      match_id: 3869685
+      concept: controlling_midfield
+
+  # regression: "semifinal" contains "final" — must NOT resolve to the Final
+  - id: route_stage_substring_trap
+    question: "Did Argentina press high in the semifinal?"
+    expect:
+      match_id: 3869519
+      concept: pressing_intensity
+
+  - id: route_quarterfinal_substring
+    question: "How did Croatia build up against Brazil?"
+    expect:
+      match_id: 3869420
+      concept: progression_buildup
+
+  - id: route_explicit_teams
+    question: "Who controlled midfield in Argentina vs Croatia?"
+    expect:
+      match_id: 3869519
+      concept: controlling_midfield
+
+  # ---------------------- routing: must refuse ----------------------
+  - id: refuse_ambiguous_team
+    question: "How did England press?"
+    expect:
+      match_id: null          # England played 5 matches — must not guess
+      concept: pressing_intensity
+
+  - id: refuse_open_ended
+    question: "What happened in the final?"
+    expect:
+      match_id: 3869685
+      concept: null           # no single metric answers this — must not force one
+
+  # ---------------------- computation: verifiable truth ----------------------
+  # Morocco 0-0 Spain: Spain dominated the ball. Externally known: Spain ~75-80%.
+  - id: compute_esp_possession_skew
+    question: "How aggressively did Spain press against Morocco?"
+    expect:
+      match_id: 3869220
+      concept: pressing_intensity
+      numeric:
+        - path: "possession_share"
+          team: Spain
+          min: 0.70
+          max: 0.85
+        # guardrail MUST trip at this skew — for BOTH teams. Possession skew is
+        # a property of the MATCH: it corrupts the low-possession side's PPDA
+        # too. Asserting only the high-possession side is a blind spot (a
+        # per-team guardrail bug still passes that check) — caught by mutation
+        # testing, hence both assertions.
+        - path: "ppda_reliable"
+          team: Spain
+          equals: false
+        - path: "ppda_reliable"
+          team: Morocco
+          equals: false
+        # Spain pressed high, Morocco sat deep — normalized
+        - path: "high_pressures_p90"
+          team: Spain
+          min: 35
+        - path: "high_pressures_p90"
+          team: Morocco
+          max: 25
+
+  # The final was 3-3 after ET. Goal timeline must be exactly the in-play goals,
+  # NOT the penalty shootout (regression: shootout kicks logged as Shot/Goal).
+  - id: compute_final_goals_exclude_shootout
+    question: "Who controlled the midfield in the final?"
+    expect:
+      match_id: 3869685
+      concept: controlling_midfield
+      goals:
+        count: 6
+        minutes: [22, 35, 79, 80, 107, 117]
+
+  # Argentina 3-0 Croatia: Croatia held MORE of the ball and lost.
+  # This is the "territorial control != superiority" case.
+  - id: compute_croatia_sterile_control
+    question: "Who controlled midfield in Argentina vs Croatia?"
+    expect:
+      match_id: 3869519
+      concept: controlling_midfield
+      numeric:
+        - path: "overall_possession"
+          team: Croatia
+          min: 0.55
+        - path: "mid_third_share_WHOLE_MATCH"
+          team: Croatia
+          min: 0.55
+
+  # The final's whole-match midfield share is ~even and MISLEADING.
+  # The timeline must show a genuine swing (both teams dominate some window).
+  - id: compute_final_timeline_swings
+    question: "Who controlled the midfield in the final?"
+    expect:
+      match_id: 3869685
+      concept: controlling_midfield
+      timeline_swing: true      # both teams must be `dominant` in >=1 window
+
+  # ---------------------- faithfulness: answer-level ----------------------
+  # These run only with a live API key. Each asserts the ANSWER text respects
+  # the guardrail rather than parroting the impressive-looking raw number.
+  - id: faith_spain_press_no_ppda_lead
+    question: "How aggressively did Spain press against Morocco?"
+    expect:
+      match_id: 3869220
+      concept: pressing_intensity
+      faithfulness:
+        must_mention_any: ["unreliable", "possession", "79%", "high press", "pressure"]
+        must_not_claim: ["elite press", "lowest PPDA", "relentless press"]
+
+  - id: faith_croatia_not_superior
+    question: "Who controlled midfield in Argentina vs Croatia?"
+    expect:
+      match_id: 3869519
+      concept: controlling_midfield
+      faithfulness:
+        must_mention_any: ["territorial", "sterile", "did not translate",
+                           "didn't translate", "lost", "3-0", "by design"]
+        must_not_claim: ["Croatia dominated", "Croatia were superior",
+                         "Croatia outplayed"]
+
+  # ---------------------- clock correctness (regression) ----------------------
+  # Found in review, not by the eval — the harness was 100% green while BOTH of
+  # these bugs were live. Every bug found becomes a case.
+  #
+  # BUG 1: ev.minute.max() picked up the penalty shootout (period 5, minutes
+  #        120-125), minting a phantom "120-135" timeline window and corrupting
+  #        the per-90 denominator.
+  # BUG 2: StatsBomb `minute` is not monotonic across periods (P1 -> 52', P2
+  #        restarts at 45'), so naive minute-binning merged first-half stoppage
+  #        with the early second half.
+  - id: clock_no_phantom_windows
+    question: "Who controlled the midfield in the final?"
+    expect:
+      match_id: 3869685
+      concept: controlling_midfield
+      clock:
+        max_window_end: 120        # nothing beyond nominal ET; no "120-135"
+        single_period_buckets: true  # no bucket may mix two periods
+
+  # ---------------------- retrieval: paraphrase robustness ----------------------
+  # These use NO alias vocabulary — the phrasings a real person types. The
+  # lexical baseline scores 2/6 here (vs 100% on the questions above, which we
+  # wrote using alias words — that gap IS the overfitting). Any semantic
+  # retriever must beat 2/6 to justify its dependency weight.
+  #
+  # Diagnostic failures worth keeping: "sit back and absorb" routes to
+  # progression_buildup because "back" collides with "playing out from the back".
+  # Token overlap, zero semantics.
+  - id: para_sit_deep_absorb
+    question: "Did Morocco just sit back and absorb everything against Spain?"
+    expect:
+      match_id: 3869220
+      # why: "sit back and absorb" IS a deep block (line height) AND a low press
+      # (pressing). An analyst would accept either reading; the ideal system
+      # returns both. Demanding only pressing_intensity was false precision.
+      concept_any: [pressing_intensity, defensive_line_height]
+
+  - id: para_hunting_ball
+    question: "Was Spain hunting the ball in the opposition half against Morocco?"
+    expect:
+      match_id: 3869220
+      concept: pressing_intensity
+
+  - id: para_engine_room
+    question: "Who ran the show in the engine room in the final?"
+    expect:
+      match_id: 3869685
+      concept: controlling_midfield
+
+  - id: para_centre_of_park
+    question: "Did Argentina boss the centre of the park against Croatia?"
+    expect:
+      match_id: 3869519
+      concept: controlling_midfield
+
+  - id: para_camped_winning_back
+    question: "Were Spain camped in Morocco's half winning it back straight away?"
+    expect:
+      match_id: 3869220
+      # why: two tactical ideas in one sentence — "camped in their half" is line
+      # height, "winning it back straight away" is counterpressing. Both correct.
+      concept_any: [pressing_intensity, defensive_line_height]
+
+  - id: para_through_the_middle
+    question: "Who bossed the game through the middle in the final?"
+    expect:
+      match_id: 3869685
+      concept: controlling_midfield
+
+  # ---------------------- 360: defensive line height ----------------------
+  # DIRECTION TEST — the single most important regression here. Freeze frames are
+  # in the ACTING team's frame, so a defender's line height = 120 - x. If that
+  # inversion is ever flipped, every answer silently swaps and still looks
+  # plausible. Spain played a high line; Morocco defended deep. Verified: Spain
+  # 53.9 vs Morocco 35.4 in the canonical band.
+  - id: line_height_direction_360
+    question: "Did Spain play a high line against Morocco?"
+    expect:
+      match_id: 3869220
+      concept: defensive_line_height
+      numeric:
+        - path: "line_height_360"
+          team: Spain
+          min: 45            # past halfway = high line
+        - path: "line_height_360"
+          team: Morocco
+          max: 42            # deeper than Spain
+        - path: "has_360"
+          team: Spain
+          equals: true

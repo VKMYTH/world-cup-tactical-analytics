@@ -1,0 +1,345 @@
+# =============================================================================
+# TACTICAL CONCEPT KNOWLEDGE BASE  —  2022 FIFA World Cup (StatsBomb open data)
+# =============================================================================
+#
+# This file is the semantic-retrieval half of the system. Each concept is a
+# tactical idea written in plain language (the part that gets embedded and
+# retrieved) PLUS a data_signature that says exactly how to compute it from
+# StatsBomb events / 360 (the part the query layer executes).
+#
+# PITCH COORDINATES (StatsBomb): 120 long x 80 wide.
+#   - x = 0 own goal line, x = 120 opponent goal line.
+#   - Locations are ALWAYS from the acting team's perspective (every team
+#     attacks toward x = 120 in its own event rows). Keep this in mind for any
+#     cross-team comparison.
+#   - Thirds: own third x<40, middle third 40<=x<=80, final third x>80.
+#   - Zone 14: central pocket just outside the box, ~ x 80-102, y 18-62.
+#
+# 360 POLICY: any concept whose truest form needs player positions sets
+#   requires_360: true and MUST provide a `fallback` computable from events
+#   alone. 2022 WC has 360 for all 64 matches, but this keeps the KB honest
+#   for the tournaments we scope out to later (some have no 360).
+#
+# -----------------------------------------------------------------------------
+# SCHEMA (per concept)
+#   id                 : stable snake_case key
+#   name               : display name
+#   aliases            : phrasings a user might type (feeds retrieval)
+#   definition         : plain-language meaning — THIS is what gets embedded
+#   tactical_context   : when/why it matters (helps the synthesis LLM)
+#   data_signature:
+#     primary_metrics  : list of {name, how} — the computable definition
+#     event_types      : StatsBomb event types needed
+#     key_fields       : statsbombpy dataframe columns used
+#     filters          : zones / play_patterns / conditions applied
+#     requires_360     : bool
+#     fallback         : events-only method when 360 is absent (if applicable)
+#   interpretation     : how to read the numbers (what's high/low, tradeoffs)
+#   example_questions  : queries that should route here (also seeds eval set)
+# =============================================================================
+
+concepts:
+
+  - id: pressing_intensity
+    name: Pressing intensity (PPDA)
+    aliases:
+      # ball-WINNING language (vs defensive_line_height's line-POSITION language —
+      # the two overlap tactically, so aliases lean into what makes each distinct)
+      - how hard did they press
+      - high press
+      - pressing
+      - PPDA
+      - did they let the opponent play out
+      - did they close down
+      - hunting the ball
+      - ball hunting
+      - win the ball back quickly
+      - winning it back straight away
+      - counterpress
+      - swarmed the ball
+      - harried the opponent
+      - pressed from the front
+      - did they sit off
+      - sat back out of possession
+      - passive out of possession
+      - low press
+      - no press
+      - absorb pressure
+    definition: >
+      How aggressively a team tries to win the ball back while the opponent has
+      it, especially high up the pitch. Measured by PPDA — passes the opponent
+      is allowed to complete per defensive action the pressing team makes in the
+      pressing zone. Fewer passes allowed per action = more intense press.
+    tactical_context: >
+      Distinguishes a proactive, ball-hunting side from one that sits in a block
+      and defends its own third. Central to how Morocco and Argentina defended.
+    data_signature:
+      primary_metrics:
+        - name: ppda
+          how: >
+            (opponent completed passes with x < 72, i.e. their own ~60%) divided
+            by (pressing team's Duel[tackle] + Interception + Foul Committed +
+            Dribbled Past events with x > 40). Lower = more intense. NOTE:
+            Pressure events are EXCLUDED from the denominator — they number in
+            the hundreds per match and collapse PPDA below the conventional
+            ~5-20 scale. Pressures are captured separately (see high_pressures).
+            Normalize per-90 for extra-time matches. NEVER report PPDA alone —
+            see reliability_guardrail.
+        - name: possession_share
+          how: >
+            team's completed passes as a share of both teams' completed passes.
+            MANDATORY companion to PPDA — the two are reported together always.
+        - name: high_pressures
+          how: count of Pressure events with x > 80 (final third)
+        - name: high_press_share
+          how: >
+            share of the team's pressing-zone defensive actions that occur in
+            the final third (x > 80). Possession-robust indicator of whether the
+            team actually pressed HIGH, independent of how much ball it had.
+      event_types: [Pass, Pressure, Duel, Interception, Foul Committed]
+      key_fields: [type, location, team, possession_team, pass_outcome]
+      filters:
+        pressing_zone: "pressing team actions x > 40"
+        opponent_pass_zone: "opponent passes x < 72"
+      requires_360: false
+    reliability_guardrail: >
+      PPDA is distorted under lopsided possession: when the opponent barely has
+      the ball there are few opponent passes to "allow", which deflates PPDA and
+      fakes an intense press. Rule: if the pressing team's possession_share > 65%
+      (equivalently opponent < 35%), mark PPDA as UNRELIABLE and lead the read
+      with high_press_share / high_pressures instead. Validated on Morocco 0-0
+      Spain: Spain's PPDA of 1.37 looks elite but Spain had 79% of the ball —
+      the honest signal is high_pressures (Spain 68 vs Morocco 24).
+    interpretation: >
+      When possession is balanced: PPDA below ~8-10 is an aggressive high press,
+      above ~15 a passive block. When possession is skewed (guardrail tripped):
+      IGNORE the PPDA magnitude and read pressing from high_press_share and
+      high_pressures — do they press high, or retreat? Always cross-read with
+      defensive_line_height: a low-block side (deep line, few high pressures) is
+      NOT pressing regardless of what PPDA says.
+    example_questions:
+      - How aggressively did Morocco press against Spain?
+      - Which team pressed higher up the pitch in the final?
+
+  - id: controlling_midfield
+    name: Controlling the midfield
+    aliases:
+      - who controlled midfield
+      - midfield dominance
+      - ran the midfield
+      - dominated the center
+      - centre of the park
+      - center of the park
+      - engine room
+      - bossed the middle
+      - who ran the show in midfield
+      - midfield battle
+      - control through the middle
+      - who had the ball in midfield
+      - midfield control
+    definition: >
+      Sustained command of the central middle third — keeping the ball there,
+      completing passes there, and progressing play through it rather than
+      around it.
+    tactical_context: >
+      "Controlled midfield" is one of the vaguest things pundits say; this
+      concept forces it into measurable territory and is a good showcase of the
+      whole prose-to-data thesis.
+    data_signature:
+      primary_metrics:
+        - name: mid_third_timeline
+          how: >
+            PRIMARY metric. mid-third possession share (completed passes + carries
+            with 40<=x<=80) computed per 15-min window, NOT as a single aggregate.
+            Control is temporal — a whole-match share averages opposite phases into
+            a meaningless number. Report the sequence of who dominated each window.
+        - name: mid_third_share_whole_match
+          how: >
+            CONTEXT ONLY, explicitly labelled as an average. Do not answer
+            "who controlled midfield" from this number alone — see interpretation.
+        - name: mid_third_pass_completion
+          how: completed passes / attempted passes for events with 40<=x<=80
+        - name: progressions_from_midfield
+          how: >
+            count of completed passes/carries STARTING in 40<=x<=80 and ENDING in
+            the final third (end x > 80), normalized per-90. Note: progression
+            VOLUME tracks possession and is not the same as effectiveness.
+        - name: goal_timeline
+          how: >
+            minutes/scorers of in-play goals (EXCLUDE period 5 penalty shootout —
+            StatsBomb logs shootout kicks as Shot/Goal ~120'). Used to read control
+            against game state.
+      event_types: [Pass, Carry, Shot]
+      key_fields: [type, location, pass_end_location, carry_end_location, pass_outcome, team, minute, period, shot_outcome]
+      filters:
+        zone: "middle third 40 <= x <= 80"
+        window: "15-minute buckets; skip windows with < 20 mid-third events"
+      requires_360: false
+    interpretation: >
+      TERRITORIAL CONTROL IS NOT SUPERIORITY. A side can own the middle third and
+      lose comfortably — validated on Argentina 3-0 Croatia, where Croatia held
+      0.60 mid-third share and out-progressed Argentina, but Argentina ceded the
+      middle by design and won on the break. Always: (1) answer from the timeline,
+      not the average; (2) read share against the scoreline — a leading side cedes
+      the middle by choice, not by being outplayed; (3) treat high share + low
+      end-product as sterile control, not dominance. The honest answer to "who
+      controlled midfield" is often "X held it territorially, but it didn't
+      translate", which is exactly the read a plain LLM misses.
+    example_questions:
+      - Who controlled the midfield in Argentina vs France?
+      - Did Croatia's midfield dominate possession against Brazil?
+
+  - id: progression_buildup
+    name: Build-up & ball progression
+    aliases:
+      - how did they build up
+      - playing out from the back
+      - progressing the ball
+      - verticality
+      - direct vs patient
+      - did they go direct
+      - long ball
+      - patient build up
+      - moving the ball forward
+      - getting up the pitch
+      - final third entries
+      - ball progression
+    definition: >
+      How a team advances the ball from its own half toward goal — how vertical
+      vs patient, and how it enters the final third.
+    tactical_context: >
+      Separates a patient positional side from a direct, vertical one, and shows
+      where progression actually comes from (back line vs midfield vs wide).
+    data_signature:
+      primary_metrics:
+        - name: progressive_passes
+          how: >
+            passes moving the ball >= 15m closer to goal (or into a more
+            advanced third); count and completion %
+        - name: verticality
+          how: >
+            mean forward component of completed passes = mean of
+            (pass_end_location.x - location.x); higher = more direct
+        - name: final_third_entries
+          how: count of passes/carries crossing from x<=80 to x>80
+        - name: buildup_start
+          how: share of possessions whose first action is by a GK or defender
+      event_types: [Pass, Carry]
+      key_fields: [location, pass_end_location, carry_end_location, pass_length, pass_angle, position, play_pattern]
+      filters:
+        open_play_only: "play_pattern == 'Regular Play' for verticality metric"
+      requires_360: false
+    interpretation: >
+      High verticality + few final-third entries = direct but ineffective (lots
+      of hopeful long balls). Low verticality + many entries = patient build-up
+      that still arrives. Always filter to open play so set pieces don't skew it.
+    example_questions:
+      - How did Germany try to build up against Japan?
+      - Were England more direct or patient against France?
+
+  - id: zone_14_threat
+    name: Zone 14 threat
+    aliases:
+      - creating chances centrally
+      - the hole
+      - between the lines
+      - central creativity
+      - zone 14
+      - danger zone
+      - top of the box
+      - playmaking centrally
+      - chances through the middle
+    definition: >
+      Attacking output generated through Zone 14 — the central pocket just
+      outside the penalty area, historically the highest-assist zone on the
+      pitch. Getting the ball there and producing shots/key passes from it.
+    tactical_context: >
+      A concrete, well-known "high value real estate" concept that maps cleanly
+      to coordinates and reads beautifully on a pitch map for the demo.
+    data_signature:
+      primary_metrics:
+        - name: zone14_receptions
+          how: count of completed passes whose pass_end_location falls in Zone 14
+        - name: zone14_key_passes
+          how: passes from Zone 14 with pass_shot_assist == True
+        - name: zone14_shots
+          how: Shot events whose origin location falls in Zone 14
+      event_types: [Pass, Shot, Ball Receipt]
+      key_fields: [location, pass_end_location, pass_shot_assist, shot_statsbomb_xg, team]
+      filters:
+        zone_14: "80 <= x <= 102 AND 18 <= y <= 62"
+      requires_360: false
+    interpretation: >
+      High receptions but few key passes/shots = a team that reaches the zone
+      but can't hurt you from it. Pair with shot_statsbomb_xg to weight quality,
+      not just volume.
+    example_questions:
+      - Did Argentina create much through the middle against Croatia?
+      - Where did Mbappe do his damage in the final?
+
+  - id: defensive_line_height
+    name: Defensive line height
+    aliases:
+      # line-POSITION language. NOTE: overlaps with pressing_intensity by nature
+      # (a deep block usually means a low press) — questions like "did they sit
+      # back and absorb" legitimately read as EITHER. The golden set encodes that
+      # with concept_any rather than pretending one answer is correct.
+      - high line
+      - deep block
+      - how high did they defend
+      - offside trap
+      - space in behind
+      - back line position
+      - pushed the line up
+      - dropped deep
+      - how deep did they sit
+      - did they squeeze up
+      - compact vertically
+      - space behind the defence
+    definition: >
+      How far up the pitch a team holds its defensive line. A high line
+      compresses space and supports pressing but leaves room to be exploited in
+      behind; a deep line concedes territory but protects the space behind.
+    tactical_context: >
+      The clearest example of a concept whose TRUE form needs 360 (you want the
+      actual back line's position while defending) but which has a usable
+      events-only proxy — so it's the reference implementation for the fallback
+      pattern.
+    data_signature:
+      primary_metrics:
+        - name: line_height_360
+          how: >
+            during OPPONENT possessions, mean x of the defending team's deepest
+            outfield defenders taken from 360 freeze-frame teammate locations;
+            higher = higher line
+        - name: defensive_action_height
+          how: mean x of the team's Pressure/Tackle/Interception/Clearance events
+      event_types: [Pressure, Duel, Interception, Clearance, Ball Recovery]
+      key_fields: [location, type, team, possession_team]
+      requires_360: true
+      fallback: >
+        Use defensive_action_height (mean x of defensive actions) as the proxy.
+        Weaker because it reflects where actions HAPPENED, not where the line
+        SAT during passive phases, but it is directionally correct and needs
+        events only — so the concept still answers on non-360 competitions.
+    interpretation: >
+      Read against pressing_intensity: high line + high press = coherent
+      aggressive plan; high line + low press = vulnerable to balls over the top.
+      Flag when the 360 line height and the action-height proxy disagree sharply
+      — that gap is itself interesting.
+    example_questions:
+      - Did Spain play a high line against Morocco?
+      - How did Argentina defend the space in behind in the final?
+
+# =============================================================================
+# STARTER SET COVERS: pressing, midfield control, progression, central threat,
+# and line height (the 360 + fallback reference).
+#
+# NOT YET WRITTEN (next batch, same schema):
+#   - counter_pressing        (easy: StatsBomb has a `counterpress` boolean flag)
+#   - wide_overloads          (360 for numerical advantage; volume/territory fallback)
+#   - directness_transition   (win-to-shot speed)
+#   - field_tilt              (final-third possession share vs opponent)
+#   - defensive_compactness   (360: block spread; action-spread fallback)
+#   - set_piece_structure     (play_pattern == From Corner / From Free Kick)
+# =============================================================================

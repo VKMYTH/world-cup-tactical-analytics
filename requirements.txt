@@ -1,0 +1,16 @@
+# Football tactical RAG — 2022 World Cup
+# Install:  pip install -r requirements.txt
+
+statsbombpy>=1.21.0     # StatsBomb open event + 360 data
+pandas>=2.0             # event dataframes
+pyyaml>=6.0             # loads concept_kb.yaml  (import name: yaml)
+anthropic>=0.40         # synthesis  (needs ANTHROPIC_API_KEY)
+mplsoccer>=1.6          # pitch maps  (speaks StatsBomb coords natively)
+matplotlib>=3.7         # charts
+streamlit>=1.30         # web UI  (run: streamlit run app.py)
+
+# Semantic concept retrieval. ONNX-based (~50MB) rather than
+# sentence-transformers/torch (~2GB) — matters for Streamlit Cloud deploys.
+# Downloads its model from HuggingFace on first run.
+fastembed>=0.3
+python-dotenv>=1.0     # loads .env (used by app.py)
